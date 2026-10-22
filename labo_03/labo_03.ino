@@ -11,6 +11,7 @@
 #define DIA_WHEEL 6.50
 #define CIRC_WHEEL 20.42
 
+MeGyro gyro(0, 0x69);
 MeRGBLed led(PORT0, LEDNUM);
 MeEncoderOnBoard encoder_1(SLOT1);
 MeEncoderOnBoard encoder_2(SLOT2);
@@ -25,8 +26,12 @@ typedef enum {
 } State;
 
 State currentState = SETUP;
+State previousState = SETUP;
 
 unsigned long currentTime = 0;
+double targetDistance = 120.0;
+short speed = 100;
+
 
 void isr_process_encoder_1(void)
 {
@@ -71,6 +76,13 @@ void configureEncoders(void)
 
   encoder_1.setSpeedPid(0.18, 0, 0);
   encoder_2.setSpeedPid(0.18, 0, 0);
+
+  // encoder_1.setPosDeadBand(10);
+  // encoder_2.setPosDeadBand(10);
+
+  // encoder_1.setFullPositionPidEnabled(true);
+  // encoder_2.setFullPositionPidEnabled(true);
+
 }
 
 void encodersLoop(void)
@@ -84,28 +96,91 @@ void setup()
   attachInterrupt(encoder_1.getIntNum(), isr_process_encoder_1, RISING);
   attachInterrupt(encoder_2.getIntNum(), isr_process_encoder_2, RISING);
 
+  gyro.begin();
   led.setpin(LEDPIN);
 
   Serial.begin(BAUDS);
 
   configureEncoders();
+  
+
 }
+
+
 
 void loop()
 {
+  gyro.update();
   encodersLoop();
   currentTime = millis();
-  int distance = readDistance(currentTime);
+  // float distance = readDistance(currentTime);
   stateManager(currentTime);
-  goTo(0);
+  
   
 }
-void goTo(float d)
+
+void goTo(float dist, short speed = 100)
 {
-  float degree = (d * 360) / CIRC_WHEEL;
+  float degree = (dist * 360) / CIRC_WHEEL;
   
-  encoder_1.moveTo(-degree);
-  encoder_2.moveTo(degree);
+  encoder_1.moveTo(-degree, speed);
+  encoder_2.moveTo(degree, speed);
+}
+
+void goStraight(short speed = 100, bool firstRun = 0)
+{
+  static double zAngleGoal = 0.0;
+
+  static double error = 0.0;
+  static double sumError = 0.0;
+  static double previousError = 0.0;
+
+  static double correction = 0.0;
+
+  const double kp = 6.5;
+  const double ki = 0.0;
+  const double kd = 1.1;
+
+  if (firstRun)
+  {
+    firstRun = false;
+    zAngleGoal = gyro.getAngleZ();
+
+    encoder_1.setMotorPwm(-speed);
+    encoder_2.setMotorPwm(speed);
+    
+    return;
+  }
+
+  error = gyro.getAngleZ() - zAngleGoal;
+  sumError += error;
+
+  correction = kp * error + ki * sumError + kd * (error - previousError);
+  previousError = error;
+
+  
+  encoder_1.setMotorPwm(-speed - correction);
+  encoder_2.setMotorPwm(speed - correction);
+
+}
+
+void stopEngine()
+{
+  encoder_1.setMotorPwm(0);
+  encoder_2.setMotorPwm(0);
+}
+
+void showProgressLEDs(double traversed, double target)
+{
+  int index = map(traversed, 0, target, 1, 7);
+  led.setColor(index, 0, 255, 0);
+  led.show();
+}
+
+void turnOffLEDs()
+{
+  led.setColor(RINGALLLEDS, 0, 0, 0);
+  led.show();
 }
 
 int readDistance(unsigned long t) 
@@ -161,6 +236,7 @@ void setupState(unsigned long t)
   {
     // Sortie
     firstTime = true;
+    previousState = SETUP;
     currentState = SEG_A;
   }
 }
@@ -169,26 +245,46 @@ void segAState(unsigned long t)
 {
   static bool firstTime = true;
   static unsigned long exitTime = 0UL;
-  // Autres variables ex: distance, delai, etc.
-  // Si nécéssaire!
+  
+  static long pos_1 = 0;
+  static long pos_2 = 0;
 
   if (firstTime)
   {
     // Entrée
-    //exitTime = t + delay;
+    Serial.println("SEG_A");
     firstTime = false;
+
+    pos_1 = encoder_1.getCurPos();
+    pos_2 = encoder_2.getCurPos();
+
+    goStraight(100, 1);
     return;
   }
 
   // Tâche(s) à effectuer
+  double degree_1 = (double)encoder_1.getCurPos() - pos_1;
+  double degree_2 = (double)encoder_2.getCurPos() - pos_2;
 
-  bool transition = false; // False pour condition de sortie
+  double averageDegrees = (fabs(degree_1) + fabs(degree_2)) / 2.0;
+
+  double distanceTraveled = averageDegrees * CIRC_WHEEL / 360.0;
+  showProgressLEDs(distanceTraveled, targetDistance);
+  goStraight(100);
+  
+  bool transition = distanceTraveled >= targetDistance; // False pour condition de sortie
 
   if (transition)
   {
-    // Sortie
+    // Sorties
+    stopEngine();
+    turnOffLEDs();
+    led.setColorAt(LEDNUM - 1, 0, 255, 0);
+    led.show();
+    
     firstTime = true;
-    //currentState = nextState;
+    previousState = SEG_A;
+    currentState = PIVOT;
   }
 }
 
@@ -202,6 +298,7 @@ void pivotState(unsigned long t)
   if (firstTime)
   {
     // Entrée
+    Serial.println("PIVOT");
     //exitTime = t + delay;
     firstTime = false;
     return;
@@ -284,4 +381,5 @@ void task(unsigned long t)
 
   // Chose(s) à faire
 }
+
 
