@@ -9,7 +9,10 @@
 #define ENC_PULSE  9
 #define ENC_RATIO 39.267
 #define DIA_WHEEL 6.50
+#define DIST_WHEEL 151
 #define CIRC_WHEEL 20.42
+#define FULL_TURN_CIRC 948.8
+#define FULL_SPIN_CIRC 474.4
 
 MeGyro gyro(0, 0x69);
 MeRGBLed led(PORT0, LEDNUM);
@@ -22,14 +25,16 @@ typedef enum {
   SEG_A,
   PIVOT,
   SEG_B,
-  SEG_C
+  SEG_C,
+  FIN_A
 } State;
 
-State currentState = SETUP;
-State previousState = SETUP;
+State currentState = SEG_C;
+State previousState = SEG_C;
 
 unsigned long currentTime = 0;
 double targetDistance = 120.0;
+double obstacle = 30.0;
 short speed = 100;
 
 
@@ -106,17 +111,12 @@ void setup()
 
 }
 
-
-
 void loop()
 {
   gyro.update();
   encodersLoop();
   currentTime = millis();
-  // float distance = readDistance(currentTime);
   stateManager(currentTime);
-  
-  
 }
 
 void goTo(float dist, short speed = 100)
@@ -170,9 +170,9 @@ void stopEngine()
   encoder_2.setMotorPwm(0);
 }
 
-void showProgressLEDs(double traversed, double target)
+void showProgressLEDs(double traversed, double start, double end)
 {
-  int index = map(traversed, 0, target, 1, 7);
+  int index = map(traversed, start, end, 1, 7);
   led.setColor(index, 0, 255, 0);
   led.show();
 }
@@ -210,8 +210,10 @@ void stateManager(unsigned long t)
   {
     case SETUP: setupState(t); break;
     case SEG_A: segAState(t); break;
-    case PIVOT: pivotState(t); break;
     case SEG_B: segBState(t); break;
+    case SEG_C: segCState(t); break;
+    //case PIVOT: pivotState(t); break;
+
   }
 }
 
@@ -269,7 +271,7 @@ void segAState(unsigned long t)
   double averageDegrees = (fabs(degree_1) + fabs(degree_2)) / 2.0;
 
   double distanceTraveled = averageDegrees * CIRC_WHEEL / 360.0;
-  showProgressLEDs(distanceTraveled, targetDistance);
+  showProgressLEDs(distanceTraveled, 0, targetDistance);
   goStraight(100);
   
   bool transition = distanceTraveled >= targetDistance; // False pour condition de sortie
@@ -284,6 +286,91 @@ void segAState(unsigned long t)
     
     firstTime = true;
     previousState = SEG_A;
+    currentState = PIVOT;
+  }
+}
+
+void segBState(unsigned long t)
+{
+  static bool firstTime = true;
+  static unsigned long exitTime = 0UL;
+  static double startingDistance = 0.0;
+  
+  if (firstTime)
+  {
+    // Entrée
+    Serial.println("SEG_B");
+    firstTime = false;
+
+    startingDistance = readDistance(t);
+    goStraight(75, 1);
+    return;
+  }
+
+  double distance = readDistance(t);
+  Serial.println(readDistance(t));
+  showProgressLEDs(distance, startingDistance, obstacle);
+  goStraight(75);
+
+  bool transition = distance < obstacle; // False pour condition de sortie
+
+  if (transition)
+  {
+    // Sortie
+    stopEngine();
+    turnOffLEDs();
+    led.setColorAt(LEDNUM - 2, 0, 255, 0);
+    led.show();
+
+    firstTime = true;
+    previousState = SEG_B;
+    currentState = PIVOT;
+  }
+}
+
+void segCState(unsigned long t)
+{
+  static bool firstTime = true;
+  static unsigned long exitTime = 0UL;
+  
+  static long pos_1 = 0;
+  static long pos_2 = 0;
+
+  if (firstTime)
+  {
+    // Entrée
+    Serial.println("SEG_C");
+    firstTime = false;
+
+    pos_1 = encoder_1.getCurPos();
+    pos_2 = encoder_2.getCurPos();
+
+    goStraight(100, 1);
+    return;
+  }
+
+  // Tâche(s) à effectuer
+  double degree_1 = (double)encoder_1.getCurPos() - pos_1;
+  double degree_2 = (double)encoder_2.getCurPos() - pos_2;
+
+  double averageDegrees = (fabs(degree_1) + fabs(degree_2)) / 2.0;
+
+  double distanceTraveled = averageDegrees * CIRC_WHEEL / 360.0;
+  showProgressLEDs(distanceTraveled, 0, targetDistance);
+  goStraight(100);
+  
+  bool transition = distanceTraveled >= targetDistance; // False pour condition de sortie
+
+  if (transition)
+  {
+    // Sorties
+    stopEngine();
+    turnOffLEDs();
+    led.setColorAt(LEDNUM - 3, 0, 255, 0);
+    led.show();
+    
+    firstTime = true;
+    previousState = SEG_C;
     currentState = PIVOT;
   }
 }
@@ -305,18 +392,51 @@ void pivotState(unsigned long t)
   }
 
   // Tâche(s) à effectuer
+  if (previousState == SEG_A)
+  {
 
-  bool transition = false; // False pour condition de sortie
+  }
+
+  if (previousState == SEG_B)
+  {
+    
+  }
+  
+  if (previousState == SEG_C)
+  {
+    
+  }
+
+  bool transition = false && previousState == SEG_A; // False pour condition de sortie
+  bool transition = false && previousState == SEG_B; // False pour condition de sortie
+  bool transition = false && previousState == SEG_C; // False pour condition de sortie
 
   if (transition)
   {
     // Sortie
     firstTime = true;
-    //currentState = nextState;
+    previousState = PIVOT
+    currentState = SEG_B;
+  }
+
+  if (transition)
+  {
+    // Sortie
+    firstTime = true;
+    previousState = PIVOT
+    currentState = SEG_C;
+  }
+
+  if (transition)
+  {
+    // Sortie
+    firstTime = true;
+    previousState = PIVOT
+    currentState = FIN_A;
   }
 }
 
-void segBState(unsigned long t)
+void finAState(unsigned long t)
 {
   static bool firstTime = true;
   static unsigned long exitTime = 0UL;
@@ -343,7 +463,7 @@ void segBState(unsigned long t)
   }
 }
 
-void state_X(unsigned long t)
+void XState(unsigned long t)
 {
   static bool firstTime = true;
   static unsigned long exitTime = 0UL;
