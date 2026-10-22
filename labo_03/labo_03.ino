@@ -29,8 +29,8 @@ typedef enum {
   FIN_A
 } State;
 
-State currentState = SEG_C;
-State previousState = SEG_C;
+State currentState = SETUP;
+State previousState = SETUP;
 
 unsigned long currentTime = 0;
 double targetDistance = 120.0;
@@ -107,8 +107,6 @@ void setup()
   Serial.begin(BAUDS);
 
   configureEncoders();
-  
-
 }
 
 void loop()
@@ -158,7 +156,6 @@ void goStraight(short speed = 100, bool firstRun = 0)
   correction = kp * error + ki * sumError + kd * (error - previousError);
   previousError = error;
 
-  
   encoder_1.setMotorPwm(-speed - correction);
   encoder_2.setMotorPwm(speed - correction);
 
@@ -212,7 +209,7 @@ void stateManager(unsigned long t)
     case SEG_A: segAState(t); break;
     case SEG_B: segBState(t); break;
     case SEG_C: segCState(t); break;
-    //case PIVOT: pivotState(t); break;
+    case PIVOT: pivotState(t); break;
 
   }
 }
@@ -308,7 +305,6 @@ void segBState(unsigned long t)
   }
 
   double distance = readDistance(t);
-  Serial.println(readDistance(t));
   showProgressLEDs(distance, startingDistance, obstacle);
   goStraight(75);
 
@@ -394,44 +390,46 @@ void pivotState(unsigned long t)
   // Tâche(s) à effectuer
   if (previousState == SEG_A)
   {
-
+    Serial.println("SEG_A ==> PIVOT");
   }
 
   if (previousState == SEG_B)
   {
+    Serial.println("SEG_B ==> PIVOT");
     
   }
   
   if (previousState == SEG_C)
   {
+    Serial.println("SEG_C ==> PIVOT");
     
   }
 
-  bool transition = false && previousState == SEG_A; // False pour condition de sortie
-  bool transition = false && previousState == SEG_B; // False pour condition de sortie
-  bool transition = false && previousState == SEG_C; // False pour condition de sortie
+  bool transitionA = /*false &&*/ previousState == SEG_A; // False pour condition de sortie
+  bool transitionB = /*false &&*/ previousState == SEG_B; // False pour condition de sortie
+  bool transitionC = /*false &&*/ previousState == SEG_C; // False pour condition de sortie
 
-  if (transition)
+  if (transitionA)
   {
     // Sortie
     firstTime = true;
-    previousState = PIVOT
+    previousState = PIVOT;
     currentState = SEG_B;
   }
 
-  if (transition)
+  if (transitionB)
   {
     // Sortie
     firstTime = true;
-    previousState = PIVOT
+    previousState = PIVOT;
     currentState = SEG_C;
   }
 
-  if (transition)
+  if (transitionC)
   {
     // Sortie
     firstTime = true;
-    previousState = PIVOT
+    previousState = PIVOT;
     currentState = FIN_A;
   }
 }
