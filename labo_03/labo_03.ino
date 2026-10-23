@@ -1,3 +1,4 @@
+// DA pair
 #include <MeAuriga.h>
 
 #define BAUDS  115200
@@ -34,6 +35,7 @@ State previousState = SETUP;
 
 unsigned long currentTime = 0;
 double targetDistance = 150.0;
+double returning = 0.0;
 double obstacle = 30.0;
 short speed = 100;
 
@@ -199,6 +201,33 @@ void turnOffLEDs()
   led.show();
 }
 
+void blinkFinishLEDs(unsigned long t)
+{
+  static unsigned long lastTime = 0;
+  static bool ledsOn = false;
+
+  const unsigned long interval = 50;
+
+  if (t - lastTime < interval) return;
+
+  lastTime = t;
+  ledsOn = !ledsOn;
+
+  for (int i = 8; i <= 12; i++)
+  {
+    if (ledsOn)
+    {
+      led.setColorAt(i, 0, 255, 0);
+    }
+    else
+    {
+      led.setColorAt(i, 0, 0, 0);
+    }
+  }
+
+  led.show();
+}
+
 int readDistance(unsigned long t) 
 {
   static unsigned long previousRead = 0;
@@ -229,6 +258,7 @@ void stateManager(unsigned long t)
     case SEG_B: segBState(t); break;
     case SEG_C: segCState(t); break;
     case PIVOT: pivotState(t); break;
+    case FIN_A: finAState(t); break;
 
   }
 }
@@ -325,7 +355,7 @@ void segBState(unsigned long t)
   showProgressLEDs(distance, startingDistance, obstacle);
   goStraight(speed);
 
-  bool transition = distance < obstacle;
+  bool transition = distance <= obstacle;
 
   if (transition)
   {
@@ -452,7 +482,7 @@ void finAState(unsigned long t)
     return;
   }
 
-
+  blinkFinishLEDs(t);
 
   bool transition = false;
 
