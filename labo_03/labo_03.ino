@@ -34,7 +34,7 @@ State currentState = SETUP;
 State previousState = SETUP;
 
 unsigned long currentTime = 0;
-double targetDistance = 150.0;
+double targetDistance = 120.0;
 double returning = 0.0;
 double obstacle = 30.0;
 short speed = 100;
@@ -126,9 +126,9 @@ void goStraight(short speed = 100, bool firstRun = 0)
 
   static double correction = 0.0;
 
-  const double kp = 8;
-  const double ki = 0.0;
-  const double kd = 1.1;
+  const double kp = 8.5;
+  const double ki = 0.2;
+  const double kd = 5.5;
 
   if (firstRun)
   {
