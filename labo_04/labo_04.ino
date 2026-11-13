@@ -1,7 +1,11 @@
-// DA pair
 #include <MeAuriga.h>
+#include <Adafruit_seesaw.h>
 
 #define BAUDS  115200
+
+#define SEUIL 500
+
+#define NB_IR 5
 
 #define LEDNUM 12
 #define LEDPIN 44
@@ -15,6 +19,7 @@
 #define FULL_TURN_CIRC 94.88
 #define FULL_SPIN_CIRC 47.44
 
+Adafruit_seesaw ss;
 MeGyro gyro(0, 0x69);
 MeRGBLed led(PORT0, LEDNUM);
 MeEncoderOnBoard encoder_1(SLOT1);
@@ -30,17 +35,53 @@ typedef enum {
   FIN_A
 } State;
 
+typedef enum {
+  BOOT,
+  ATTENTE,
+  ERREUR,
+  LAB3,
+  NON_CALIB,
+  CALIB,
+  SUIVRE_LIGNE
+} Action;
+
+struct Capteur
+{
+  int valeurMin = 1023;
+  int valeurMax = 0;
+  int valeurLue;
+  int valeurNormalisee;
+};
+
+String commands[] =
+{
+  "stop",
+  "done",
+  "lab3",
+  "cal",
+  "ligne"
+};
+
+Capteur capteurs[NB_IR];
+
+Action currentAction = BOOT;
+
 State currentState = SETUP;
 State previousState = SETUP;
 
 unsigned long currentTime = 0;
+
+String lastCommand;
+
+bool is_calibrated = false;
+bool commandKnown = false;
+
 double targetDistance = 120.0;
-double returning = 0.0;
 double obstacle = 30.0;
-short speed = 100;
+short speed = 80;
 
 int tolerance = 2;
-short pivotingSpeed = 80;
+short pivotingSpeed = speed / 2;
 
 void isr_process_encoder_1(void)
 {
@@ -85,7 +126,6 @@ void configureEncoders(void)
 
   encoder_1.setSpeedPid(0.18, 0, 0);
   encoder_2.setSpeedPid(0.18, 0, 0);
-
 }
 
 void encodersLoop(void)
@@ -94,18 +134,21 @@ void encodersLoop(void)
   encoder_2.loop();
 }
 
+void blinkErrorLEDs(unsigned long t, bool firstRun = false);
+void blinkUnknowCommandLEDs(unsigned long t, bool firstRun = false);
+
 void setup()
 {
   attachInterrupt(encoder_1.getIntNum(), isr_process_encoder_1, RISING);
   attachInterrupt(encoder_2.getIntNum(), isr_process_encoder_2, RISING);
 
+  ss.begin();
   gyro.begin();
   led.setpin(LEDPIN);
 
   Serial.begin(BAUDS);
 
   configureEncoders();
-  
 }
 
 void loop()
@@ -113,7 +156,7 @@ void loop()
   gyro.update();
   encodersLoop();
   currentTime = millis();
-  stateManager(currentTime);
+  handsOnActions(currentTime);
 }
 
 void goStraight(short speed = 100, bool firstRun = 0)
@@ -126,9 +169,9 @@ void goStraight(short speed = 100, bool firstRun = 0)
 
   static double correction = 0.0;
 
-  const double kp = 8.5;
-  const double ki = 0.01;
-  const double kd = 5.5;
+  const double kp = 3;
+  const double ki = 0;
+  const double kd = 1;
 
   if (firstRun)
   {
@@ -137,7 +180,7 @@ void goStraight(short speed = 100, bool firstRun = 0)
 
     encoder_1.setMotorPwm(-speed);
     encoder_2.setMotorPwm(speed);
-    
+
     return;
   }
 
@@ -146,37 +189,68 @@ void goStraight(short speed = 100, bool firstRun = 0)
 
   correction = kp * error + ki * sumError + kd * (error - previousError);
   previousError = error;
-  
+
   encoder_1.setMotorPwm(-speed - correction);
   encoder_2.setMotorPwm(speed - correction);
-
 }
 
 bool spin(short speed, int targetAngle, bool firstRun = false)
 {
-  static double zAngleGoal = 0.0;
+  static double previousAngle = 0.0;
+  static double totalAngle = 0.0;
 
   if (firstRun)
   {
-    gyro.resetData();
-    zAngleGoal = targetAngle;
+    totalAngle = 0.0;
+    previousAngle = gyro.getAngleZ();
+
     return false;
   }
+
+  double currentAngle = gyro.getAngleZ();
+
+  double difference = currentAngle - previousAngle;
+
+  
+  if (difference > 180)
+  {
+    difference -= 360;
+  }
+  else if (difference < -180)
+  {
+    difference += 360;
+  }
+
+  totalAngle += difference;
+  previousAngle = currentAngle;
 
   if (targetAngle > 0)
   {
     encoder_1.setMotorPwm(speed);
     encoder_2.setMotorPwm(speed);
 
-    return gyro.getAngleZ() >= zAngleGoal - tolerance;
+    return totalAngle >= targetAngle - tolerance;
   }
   else
   {
     encoder_1.setMotorPwm(-speed);
     encoder_2.setMotorPwm(-speed);
 
-    return gyro.getAngleZ() <= zAngleGoal + tolerance;
+    return totalAngle <= targetAngle + tolerance;
   }
+}
+
+bool isCommandKnown (String cmd)
+{
+  int size = sizeof(commands) / sizeof(commands[0]);
+
+  for (int i = 0; i < size; i++)
+  {
+    if (cmd == commands[i])
+      return true;
+  }
+
+  return false;
 }
 
 void stopEngine()
@@ -228,7 +302,7 @@ void blinkFinishLEDs(unsigned long t)
   led.show();
 }
 
-int readDistance(unsigned long t) 
+int readDistance(unsigned long t)
 {
   static unsigned long previousRead = 0;
   unsigned long rate = 100;
@@ -240,14 +314,14 @@ int readDistance(unsigned long t)
 
     int distance = ultrasonicSensor.distanceCm();
 
-    if (distance >= 0 && distance <= 400) 
+    if (distance >= 0 && distance <= 400)
     {
       lastResult = distance;
     }
   }
 
   return lastResult;
-} 
+}
 
 void stateManager(unsigned long t)
 {
@@ -259,9 +333,24 @@ void stateManager(unsigned long t)
     case SEG_C: segCState(t); break;
     case PIVOT: pivotState(t); break;
     case FIN_A: finAState(t); break;
-
   }
 }
+
+void handsOnActions(unsigned long ct)
+{
+  switch (currentAction)
+  {
+    case BOOT: bootState(ct); break;
+    case ATTENTE: attenteState(ct); break;
+    case ERREUR: errorState(ct); break;
+    case LAB3: lab3State(ct); break;
+    case NON_CALIB: nonCalibState(ct); break;
+    case CALIB: calibState(ct); break;
+    case SUIVRE_LIGNE: suivreLigneState(ct); break;
+  }
+}
+
+#pragma region Fonction Etat Lab_03
 
 void setupState(unsigned long t)
 {
@@ -293,7 +382,7 @@ void segAState(unsigned long t)
 {
   static bool firstTime = true;
   static unsigned long exitTime = 0UL;
-  
+
   static long pos_1 = 0;
   static long pos_2 = 0;
 
@@ -319,8 +408,8 @@ void segAState(unsigned long t)
   double distanceTraveled = averageDegrees * CIRC_WHEEL / 360.0;
   showProgressLEDs(distanceTraveled, 0, targetDistance);
   goStraight(speed);
-  
-  bool transition = distanceTraveled >= targetDistance; // False pour condition de sortie
+
+  bool transition = distanceTraveled >= targetDistance;
 
   if (transition)
   {
@@ -329,7 +418,7 @@ void segAState(unsigned long t)
     turnOffLEDs();
     led.setColorAt(LEDNUM - 1, 0, 255, 0);
     led.show();
-    
+
     firstTime = true;
     previousState = SEG_A;
     currentState = PIVOT;
@@ -340,7 +429,7 @@ void segBState(unsigned long t)
 {
   static bool firstTime = true;
   static double startingDistance = 0.0;
-  
+
   if (firstTime)
   {
     Serial.println("SEG_B");
@@ -352,6 +441,7 @@ void segBState(unsigned long t)
   }
 
   double distance = readDistance(t);
+  
   showProgressLEDs(distance, startingDistance, obstacle);
   goStraight(speed);
 
@@ -374,7 +464,7 @@ void segCState(unsigned long t)
 {
   static bool firstTime = true;
   static unsigned long exitTime = 0UL;
-  
+
   static long pos_1 = 0;
   static long pos_2 = 0;
 
@@ -398,7 +488,7 @@ void segCState(unsigned long t)
   double distanceTraveled = averageDegrees * CIRC_WHEEL / 360.0;
   showProgressLEDs(distanceTraveled, 0, targetDistance);
   goStraight(speed);
-  
+
   bool transition = distanceTraveled >= targetDistance;
 
   if (transition)
@@ -407,7 +497,7 @@ void segCState(unsigned long t)
     turnOffLEDs();
     led.setColorAt(LEDNUM - 3, 0, 255, 0);
     led.show();
-    
+
     firstTime = true;
     previousState = SEG_C;
     currentState = PIVOT;
@@ -493,6 +583,481 @@ void finAState(unsigned long t)
   }
 }
 
+#pragma endregion
+
+void serialEvent()
+{
+  if (!Serial.available()) return;
+
+  lastCommand = Serial.readStringUntil('\n');
+
+  lastCommand.trim();
+
+  Serial.print("Robot a reçu : ");
+  Serial.println(lastCommand);
+
+  commandKnown = isCommandKnown(lastCommand);
+}
+
+void bootState(unsigned long t)
+{
+  static bool firstTime = true;
+  static unsigned long exitTime = 0UL;
+  int delay = 3000;
+
+  if (firstTime)
+  {
+    // Entrée
+    Serial.println("BOOT");
+    exitTime = t + delay;
+    firstTime = false;
+    return;
+  }
+
+  bool transition = t > exitTime;
+
+  if (transition)
+  {
+    // Sortie
+    firstTime = true;
+    currentAction = ATTENTE;
+  }
+}
+
+void attenteState(unsigned long t)
+{
+  static bool firstTime = true;
+
+  if (firstTime)
+  {
+    Serial.println("ATTENTE");
+    firstTime = false;
+    return;
+  }
+
+  if (lastCommand.length() == 0) return;
+
+  if (!commandKnown)
+  {
+    firstTime = true;
+    currentAction = ERREUR;
+  }
+  else if (lastCommand == "cal")
+  {
+    firstTime = true;
+    currentAction = CALIB;
+  }
+  else if (lastCommand == "lab3")
+  {
+    firstTime = true;
+    currentAction = LAB3;
+  }
+  else if (lastCommand == "ligne" && !is_calibrated)
+  {
+    firstTime = true;
+    currentAction = NON_CALIB;
+  }
+  else if (lastCommand == "ligne" && is_calibrated)
+  {
+    firstTime = true;
+    currentAction = SUIVRE_LIGNE;
+  }
+  else
+  {
+    lastCommand = "";
+  }
+}
+
+void errorState(unsigned long t)
+{
+  static bool firstTime = true;
+
+  if (firstTime)
+  {
+    Serial.println("ERREUR");
+    blinkErrorLEDs(t, true);
+    firstTime = false;
+    return;
+  }
+
+  blinkErrorLEDs(t);
+
+  bool transition = (lastCommand == "stop");
+
+  if (transition)
+  {
+    firstTime = true;
+    stopEngine();
+    lastCommand = "";
+    currentAction = ATTENTE;
+  }
+}
+
+void lab3State(unsigned long t)
+{
+  static bool firstTime = true;
+
+  if (firstTime)
+  {
+    Serial.println("LAB3");
+    firstTime = false;
+    return;
+  }
+
+  stateManager(t);
+
+  bool transition = (lastCommand == "stop") || (lastCommand == "done");
+
+  if (transition)
+  {
+    firstTime = true;
+    stopEngine();
+    lastCommand = "";
+    currentAction = ATTENTE;
+  }
+}
+
+void nonCalibState(unsigned long t)
+{
+  static bool firstTime = true;
+  static unsigned long exitTime = 0UL;
+
+  if (firstTime)
+  {
+    Serial.println("NON_CALIB");
+    blinkUnknowCommandLEDs(t, true);
+    firstTime = false;
+    return;
+  }
+
+  blinkUnknowCommandLEDs(t);
+
+  bool transition = (lastCommand == "stop");
+
+  if (transition)
+  {
+    firstTime = true;
+    stopEngine();
+    lastCommand = "";
+    currentAction = ATTENTE;
+  }
+}
+
+void calibState(unsigned long t)
+{
+  static bool firstTime = true;
+
+  if (firstTime)
+  {
+    Serial.println("CALIB");
+    firstTime = false;
+    return;
+  }
+
+  calibrationAutomatic();
+
+  bool transition = is_calibrated || (lastCommand == "stop") || (lastCommand == "done");
+
+  if (transition)
+  {
+    stopEngine();
+    lastCommand = "";
+    firstTime = true;
+    currentAction = ATTENTE;
+  }
+}
+
+
+void suivreLigneState(unsigned long t)
+{
+  static bool firstTime = true;
+  static bool pivoting = false;
+
+  if (firstTime)
+  {
+    Serial.println("SUIVRE_LIGNE");
+    firstTime = false;
+    return;
+  }
+
+  if (!pivoting)
+  {
+    followLine();
+
+    bool transition = allSensorsOnBlack();
+
+    if (transition)
+    {
+
+      stopEngine();
+
+      spin(pivotingSpeed, 180, true);
+
+      pivoting = true;
+      return;
+    }
+  }
+  else
+  {
+    bool transition = spin(pivotingSpeed, 180);
+
+    if (transition)
+    {
+
+      stopEngine();
+      pivoting = false;
+    }
+  }
+
+  bool stop = (lastCommand == "stop");
+
+  if (stop)
+  {
+    stopEngine();
+    pivoting = false;
+    lastCommand = "";
+    firstTime = true;
+    currentAction = ATTENTE;
+  }
+}
+
+
+void lireCapteurs()
+{
+  for (int i = 0; i < NB_IR; i++)
+  {
+    capteurs[i].valeurLue = ss.analogRead(i);
+  }
+}
+
+void calibration()
+{
+  lireCapteurs();
+
+  for (int i = 0; i < NB_IR; i++)
+  {
+    int val = capteurs[i].valeurLue;
+
+    if (val < capteurs[i].valeurMin)
+      capteurs[i].valeurMin = val;
+
+    if (val > capteurs[i].valeurMax)
+      capteurs[i].valeurMax = val;
+  }
+}
+
+double capteurLectureNormalisee(int index)
+{
+  int valeurLue = capteurs[index].valeurLue;
+  int valeurMin = capteurs[index].valeurMin;
+  int valeurMax = capteurs[index].valeurMax;
+
+  if (valeurMax == valeurMin) return 0.0;
+
+  return ((valeurLue - valeurMin) * 1000.0) / (valeurMax - valeurMin);
+}
+
+void normaliserValeurs()
+{
+  for (int i = 0; i < NB_IR; i++)
+  {
+    capteurs[i].valeurNormalisee = capteurLectureNormalisee(i);
+  }
+}
+
+double calculerPositionLgne()
+{
+  double numerateur = 0.0;
+  double denominateur = 0.0;
+
+  for (int i = 0; i < NB_IR; i++)
+  {
+    numerateur += capteurs[i].valeurNormalisee * (i - 2);
+    denominateur += capteurs[i].valeurNormalisee;
+  }
+
+  if (denominateur == 0) return 0.0;
+
+  double position = (numerateur / denominateur) * 1000.0;
+
+  return position;
+}
+
+float computePID(float position, float consigne = 0.0f)
+{
+  static float kp = 0.2;
+  static float ki = 0.0;
+  static float kd = 0.05;
+
+  static float integral = 0;
+  static float derivative = 0;
+  static float lastError = 0;
+
+  float error = position - consigne;
+
+  integral += error;
+  derivative = error - lastError;
+  lastError = error;
+
+  float output = kp * error + ki * integral + kd * derivative;
+
+  return output;
+}
+
+bool calibrationAutomatic()
+{
+  static bool firstRun = true;
+
+  if (is_calibrated)
+  {
+    return true;
+  }
+
+  calibration();
+
+  if (spin(50, 360, firstRun))
+  {
+
+    stopEngine();
+    is_calibrated = true;
+    firstRun = true;
+
+    return true;
+  }
+
+  firstRun = false;
+  return false;
+}
+
+void followLine()
+{
+  lireCapteurs();
+
+  normaliserValeurs();
+
+  double position = calculerPositionLgne();
+
+  float correction = computePID(position);
+
+  encoder_1.setMotorPwm(-speed - correction);
+  encoder_2.setMotorPwm(speed - correction);
+}
+
+bool allSensorsOnBlack()
+{
+  for (int i = 0; i < NB_IR; i++)
+  {
+    if (capteurs[i].valeurNormalisee > SEUIL)
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void blinkErrorLEDs(unsigned long t, bool firstRun)
+{
+  static unsigned long startTime = 0;
+  static unsigned long lastTime = 0;
+  static bool ledState = false;
+
+  const unsigned long delay = 250;
+  const unsigned long duration = 3000;
+
+  if (firstRun)
+  {
+    startTime = t;
+    lastTime = t;
+    ledState = false;
+
+    led.setColor(0, 0, 0, 0);
+    led.show();
+
+    return;
+  }
+
+  if (t - startTime >= duration)
+  {
+    if (ledState)
+    {
+      ledState = false;
+      led.setColor(0, 0, 0, 0);
+      led.show();
+    }
+
+    return;
+  }
+
+  if (t - lastTime < delay) return;
+
+  lastTime = t;
+  ledState = !ledState;
+
+  if (ledState)
+  {
+    led.setColor(0, 255, 0, 0);
+  }
+  else
+  {
+    led.setColor(0, 0, 0, 0);
+  }
+
+  led.show();
+}
+
+void blinkUnknowCommandLEDs(unsigned long t, bool firstRun)
+{
+  static unsigned long startTime = 0;
+  static unsigned long lastTime = 0;
+  static bool ledState = false;
+
+  const unsigned long delay = 250;
+  const unsigned long duration = 3000;
+
+  if (firstRun)
+  {
+    startTime = t;
+    lastTime = t;
+    ledState = false;
+
+    led.setColor(0, 0, 0, 0);
+    led.show();
+
+    return;
+  }
+
+  if (t - startTime >= duration)
+  {
+    if (ledState)
+    {
+      ledState = false;
+      led.setColor(0, 0, 0, 0);
+      led.show();
+    }
+
+    return;
+  }
+
+  if (t - lastTime < delay) return;
+
+  lastTime = t;
+  ledState = !ledState;
+
+  if (ledState)
+  {
+    led.setColor(0, 255, 255, 0);
+  }
+  else
+  {
+    led.setColor(0, 0, 0, 0);
+  }
+
+  led.show();
+}
+
+#pragma region Structure Fonction
+
 void XState(unsigned long t)
 {
   static bool firstTime = true;
@@ -510,7 +1075,7 @@ void XState(unsigned long t)
 
   // Tâche(s) à effectuer
 
-  bool transition = false; // False pour condition de sortie
+  bool transition = false;
 
   if (transition)
   {
@@ -531,3 +1096,5 @@ void task(unsigned long t)
 
   // Chose(s) à faire
 }
+
+#pragma endregion
